@@ -4,6 +4,7 @@ Basic tests for utility functions
 import unittest
 import sys
 import os
+import tempfile
 from datetime import datetime
 
 # Add parent directory to path
@@ -70,6 +71,128 @@ class TestStringUtils(unittest.TestCase):
         kb_value = size_kb / 1024.0
         self.assertGreater(kb_value, 1.0)
         self.assertLess(kb_value, 1024.0)
+
+
+class TestProcessYamlFile(unittest.TestCase):
+    """
+    Tests for process_yaml_file in utils/file_handler.py.
+    Verifies that YAML processing uses safe_load (CVE-2020-1747 remediation).
+    """
+
+    def _write_yaml(self, content):
+        """Helper: write content to a temporary YAML file and return its path."""
+        tmp = tempfile.NamedTemporaryFile(
+            mode='w', suffix='.yaml', delete=False
+        )
+        tmp.write(content)
+        tmp.flush()
+        tmp.close()
+        return tmp.name
+
+    def setUp(self):
+        self._tmp_files = []
+
+    def tearDown(self):
+        for path in self._tmp_files:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def _make_yaml(self, content):
+        path = self._write_yaml(content)
+        self._tmp_files.append(path)
+        return path
+
+    def test_parses_simple_mapping(self):
+        """process_yaml_file returns a plain dict for a simple YAML mapping."""
+        from utils.file_handler import process_yaml_file
+
+        path = self._make_yaml("name: Alice\nage: 30\n")
+        result = process_yaml_file(path)
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result.get('name'), 'Alice')
+        self.assertEqual(result.get('age'), 30)
+
+    def test_parses_nested_mapping(self):
+        """process_yaml_file handles nested YAML structures."""
+        from utils.file_handler import process_yaml_file
+
+        content = "project:\n  title: Test\n  version: 1\n"
+        path = self._make_yaml(content)
+        result = process_yaml_file(path)
+        self.assertIsInstance(result, dict)
+        self.assertIn('project', result)
+        self.assertEqual(result['project']['title'], 'Test')
+
+    def test_parses_list(self):
+        """process_yaml_file handles top-level YAML lists."""
+        from utils.file_handler import process_yaml_file
+
+        path = self._make_yaml("- alpha\n- beta\n- gamma\n")
+        result = process_yaml_file(path)
+        self.assertIsInstance(result, list)
+        self.assertEqual(result, ['alpha', 'beta', 'gamma'])
+
+    def test_empty_file_returns_none_or_dict(self):
+        """process_yaml_file handles an empty YAML file without error."""
+        from utils.file_handler import process_yaml_file
+
+        path = self._make_yaml("")
+        result = process_yaml_file(path)
+        # yaml.safe_load on an empty file returns None; the function returns that
+        # directly (not an error dict).
+        self.assertNotIn('error', result if isinstance(result, dict) else {})
+
+    def test_rejects_python_object_constructor(self):
+        """
+        CVE-2020-1747: yaml.safe_load must raise an error (not execute code)
+        when the YAML payload uses the !!python/object/new constructor.
+        process_yaml_file should return an error dict rather than executing
+        arbitrary code.
+        """
+        from utils.file_handler import process_yaml_file
+
+        # This payload exploits the python/object/new constructor via
+        # yaml.load() with FullLoader / no loader argument.
+        # yaml.safe_load() rejects it with a constructor error.
+        malicious_yaml = (
+            "exploit: !!python/object/new:subprocess.check_output\n"
+            "  args: [['echo', 'pwned']]\n"
+        )
+        path = self._make_yaml(malicious_yaml)
+        result = process_yaml_file(path)
+        # safe_load raises yaml.constructor.ConstructorError; the function
+        # catches it and returns {'error': ...}.
+        self.assertIsInstance(result, dict)
+        self.assertIn('error', result,
+                      "Expected an error dict when processing a malicious YAML "
+                      "payload; got: %r" % result)
+
+    def test_invalid_yaml_returns_error_dict(self):
+        """process_yaml_file returns an error dict for malformed YAML."""
+        from utils.file_handler import process_yaml_file
+
+        path = self._make_yaml("key: [\n  unclosed\n")
+        result = process_yaml_file(path)
+        self.assertIsInstance(result, dict)
+        self.assertIn('error', result)
+
+    def test_uses_safe_load_not_full_load(self):
+        """
+        Confirm that process_yaml_file calls yaml.safe_load, not yaml.load or
+        yaml.full_load, by inspecting the source of the function.
+        """
+        import inspect
+        from utils.file_handler import process_yaml_file
+
+        source = inspect.getsource(process_yaml_file)
+        self.assertIn('safe_load', source,
+                      "process_yaml_file must use yaml.safe_load")
+        # Ensure the old unsafe call form is not present
+        self.assertNotIn('yaml.load(', source,
+                         "process_yaml_file must not use yaml.load() without "
+                         "the SafeLoader argument")
 
 
 if __name__ == '__main__':
