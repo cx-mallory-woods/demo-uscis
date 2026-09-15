@@ -82,12 +82,18 @@ def process_pickle_file(file_path):
         return {'error': str(e)}
 
 def process_yaml_file(file_path):
-    """Process YAML file"""
+    """Process YAML file safely using yaml.safe_load() to prevent arbitrary code execution.
+
+    yaml.load() without an explicit Loader (or with FullLoader/UnsafeLoader) can execute
+    arbitrary Python objects embedded in YAML documents (CVE-2017-18342).  safe_load()
+    restricts the parser to standard YAML types (dicts, lists, strings, numbers, etc.)
+    and raises an exception for any unsafe constructor tag.
+    """
     if yaml is None:
         return {'error': 'YAML library not installed'}
     try:
         with open(file_path, 'r') as f:
-            data = yaml.load(f)
+            data = yaml.safe_load(f)
         return data
     except Exception as e:
         return {'error': str(e)}
